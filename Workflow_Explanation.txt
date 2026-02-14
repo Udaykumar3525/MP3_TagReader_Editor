@@ -1,0 +1,128 @@
+--------------> 🎵 MP3 Tag Reader & Editor — Technical Documentation <-----------------
+- This will tell the real working indepth 
+
+In this projcet I manually parsed ID3v2 binary structure. First I read the header to get metadata size, 
+then iteratively parsed frames using frame IDs and sizes, stored data into a struct, 
+and displayed or modified tags directly inside the file.
+
+1. MP3 File Structure
+Every MP3 file using ID3v2 looks like: ID3 HEADER (10 bytes) + ALL FRAMES (metadata) + AUDIO DATA (music)
+Header  -> tells info about metadata
+Frames  -> store tags like title/artist
+Audio   -> actual song data
+
+2.Execution Flow Diagram
+MAIN FLOW
+main() -> check arguments, 
+if -v  -> view_tags()
+if -e  -> edit_tag()
+
+VIEW FLOW
+view_tags() -> open file -> read first 10 bytes (header) -> check "ID3" -> 
+calculate metadata size -> read_frames() -> store data in struct ->display()
+
+EDIT FLOW
+edit_tag() -> open file (read+write) -> skip header -> loop frames ->
+find matching ID -> overwrite new data -> save
+
+3. ID3 Header Structure
+Header size = 10 bytes fixed
+Byte 0-2  ->  "ID3"
+Byte 3    ->  Version
+Byte 4    ->  Revision
+Byte 5    ->  Flags
+Byte 6-9  ->  Metadata Size - so: header[6], header[7], header[8], header[9] -> store metadata size.
+
+needed of metadata size  - Without size: we don’t know where metadata ends and we might read audio as metadata
+So: Header tells -> metadata block length 
+Example: tag_size = 300, Means = Only read first 300 bytes for tags and Stop before audio
+
+4. Why syncsafe integer :
+- To prevent metadata bytes from containing 0xFF patterns which may be misinterpreted as MP3 audio frame sync,
+  ID3 stores sizes using 7-bit syncsafe integers.
+- In simple : avoid FF , prevent audio confusion
+- MP3 files contain two parts: Metadata (ID3 tags) and Audio frames (actual music)
+  MP3 audio frames always start with a special byte pattern: FF FB or FF F3 or FF F2
+  In binary this looks like: 11111111 111xxxxx -> This is called Frame Sync Pattern (marks start of audio).
+- Think what If metadata also contains FF FF FF,
+  player may think: “Audio frame started here”, But actually it is only metadata.
+  This causes: wrong parsing, audio corruption, playback errors
+- Ex: Suppose metadata size (Metadata block length ) = 65535 bytes
+  Normal 4-byte integer storage: 00 FF FF FF, (Dec - 65535, bin - 11111111 11111111, group 4 -> Hexa - FFFF)
+  This contains: FF FF FF, Looks exactly like audio frame start
+- Solution -> Syncsafe Integer : To avoid confusion, ID3 uses Syncsafe Integer
+  Instead of: 8 bits per byte (0–255), It uses: 7 bits per byte (0–127 only)
+  Key rule: MSB (most significant bit) always 0, So: 11111111 (FF) is NEVER generated
+  Therefore: metadata never looks like audio , Safe parsing 
+- In my project : Syncsafe calculation - 
+  1 byte = 8 bits = 256 values
+  here it is : 7 bits = 128 values, So: each byte stores only 0–127 , so base is 128 (normally base is 256 for 8bits)
+  our loop logic  - tag_size = (tag_size<<7) | header[i];  -> shift left 7 bits (×128) - add next byte, Meaning: size = size * 128 + byte
+  Normal integer (frame size) -> size = size * 256 + byte
+
+5.Frame Structure (Each Tag) : 
+  - Every frame has this fixed structure: | 4B ID | 4B SIZE | 2B FLAGS | DATA (size bytes) |
+    Example: TIT2  00 00 00 0F  00 00  My Song Title
+    TIT2 = Title, 00 00 00 0F = 15 bytes, 00 00 = flags, data = "My Song Title"
+  - Need of frame size -> Without size: don't know how many bytes belong to title, can't know where next frame starts
+
+6. Frame Size Conversion Logic
+   - Why convert into int -> 00 00 00 0F , These are: 4 separate bytes, NOT number 15 yet
+     Computer sees: byte byte byte byte
+     But for: malloc(size), fread(size), fseek(size) -> we need: integer number
+     So we must convert: 4 bytes -> single integer
+     Why int specifically -> Because we need numeric size for reading and memory allocation.
+
+   - Ex: Bytes read: 00 00 00 05, These are 4 separate bytes, not number 5 yet.
+     00 00 00 05 -> That is: Hexadecimal (base 16) representation NOT binary.
+      binary is hard to read thats why we are using hexa, converting that decimal to binary
+      5(decimal) = 101(binary) -> 00000101 -> (to hexa) Split into 4 bits: 0000 0101 = 05
+      00 00 00 05 -> It really means: Each byte: 00000000 00000000 00000000 00000101
+
+      Step 1 — fread() - fread(s,1,4,fp); 00 00 00 05, So: s[0] = 0, s[1] = 0, s[2] = 0 , s[3] = 5 
+      Step 2 — initialize - int size = 0;
+       - code , int size = 0;
+                  for(int i=0;i<4;i++)
+                     size = size*256 + s[i];
+      Step 3 — loop runs -> (logic - size = size*256 + s[i];)
+         i = 0, size = 0*256 + 0  -> size = 0
+         i = 1, size = 0*256 + 0  -> size = 0
+         i = 2, size = 0*256 + 0  -> size = 0
+         i = 3, size = 0*256 + 5  -> size = 5
+         returns size = 5;
+
+   - How conversion works -> I combine 4 bytes using base-256 multiplication to form the integer.
+      It stores binary like this: (take example of title is uday)
+      ID (4bytes)      -> 54 49 54 32   ← TIT2 
+      SIZE (4 bytes)   -> 00 00 00 05   ← size   (Why 5 - Because: 1 encoding byte + 4 letters, 00 + u + d + a + y)
+      flags (2bytes)   -> 00 00         
+      DATA(size bytes) -> 00 75 64 61 79 ← data (00 + u + d + a + y)
+
+7. VIEW MODE : 
+  - User runs: ./a.out -v rajasaab.mp3, Program calls: view_tags("rajasaab.mp3")
+  - open file (fp), open file (10bytes), calculate metadata size (Extracts:bytes 6–9 , Result: tag_size = total metadata length)
+  - read frames : Inside: while(bytes_read < tag_size) -> Loop until metadata ends.
+                  If TIT2 -> title, TPE1 -> artist, TALB -> album, TYER -> year, TCON -> genre, APIC -> extract image       
+    read frame id : fread(id,1,4,fp); -> Example: TIT2
+    read size : size = read_frame_size(fp); -> Converts: 00 00 00 05 to  5
+    read data : buffer = malloc(size+1); fread(buffer,1,size,fp); 
+                Reads: 00 u d a y, Skip encoding: text = buffer+1; , Store: strcpy(tag->title,text);
+    display() : print struct values
+
+8. EDIT MODE :
+  - ./a.out -e -y 2022 rajasaab.mp3 , open file in read+write mode r+
+  - skip header, fseek(fp,10)
+  - Loop frames, Find matching id: TYER (here example year)
+  - Overwrite: fwrite(new_data), Replace: 2025 -> 2022
+
+9. Things to remember
+  - Metadata size	= tells TOTAL block/tags size
+    (Metadata size tells: All frames together = 300 bytes, So: stop reading after 300 bytes
+     But inside those 300 bytes: TIT2 -> 15 bytes,  Tells only 15chars belongs to this and stop after reading 15bytes)
+     
+    Frame size    = tells INDIVIDUAL piece/Tag size
+    Syncsafe	   = base128
+    Normal size	= base256
+    Header	      = first 10 bytes
+    Frames	      = tags
+    Audio	        = music
